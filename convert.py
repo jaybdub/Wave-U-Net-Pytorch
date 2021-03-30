@@ -8,13 +8,154 @@ import model.utils as model_utils
 
 from test import predict_song
 from model.waveunet import Waveunet
-from torch2trt import torch2trt, tensorrt_converter, add_missing_trt_tensors, trt
+from torch2trt import torch2trt, tensorrt_converter, add_missing_trt_tensors, trt, trt_version, get_arg
+
+
+@tensorrt_converter('torch.nn.functional.conv_transpose1d', enabled=trt_version() >= '7.0')
+@tensorrt_converter('torch.nn.functional.conv_transpose2d', enabled=trt_version() >= '7.0')
+@tensorrt_converter('torch.nn.functional.conv_transpose3d', enabled=trt_version() >= '7.0')
+def convert_Conv_trt7_functional(ctx):
+
+
+    input = get_arg(ctx, 'input', pos=0, default=None)
+    weight = get_arg(ctx, 'weight', pos=1, default=None)
+    bias = get_arg(ctx, 'bias', pos=2, default=None)
+    stride = get_arg(ctx, 'stride', pos=3, default=1)
+    padding = get_arg(ctx, 'padding', pos=4, default=0)
+    dilation = get_arg(ctx, 'dilation', pos=5, default=1)
+    groups = get_arg(ctx, 'groups', pos=6, default=1)
+    
+    input_trt = add_missing_trt_tensors(ctx.network, [input])[0]
+    output = ctx.method_return
+
+    input_dim = input.dim() - 2
+    
+    ndim = len(output.shape)
+
+    out_channels = int(weight.shape[0])
+    kernel_size = tuple(weight.shape[2:])
+    if not isinstance(kernel_size, tuple):
+        kernel_size = (kernel_size, ) * input_dim
+
+    if not isinstance(stride, tuple):
+        stride = (stride, ) * input_dim
+
+    if not isinstance(padding, tuple):
+        padding = (padding, ) * input_dim
+
+    # if not isinstance(dilation, tuple):
+    #     dilation = (dilation, ) * input_dim
+
+    kernel = weight.detach().cpu().numpy()
+    
+    if bias is not None:
+        bias = bias.detach().cpu().numpy()
+
+    # reshape 1D to 2D to use 2D convolutions to accomplish 1D conv
+    if input_dim == 1:
+        layer = ctx.network.add_shuffle(input_trt)
+        layer.reshape_dims = (-1, 1, input.shape[-1])
+        input_trt = layer.get_output(0)
+        kernel_size = (1,) + kernel_size
+        stride = (1,) + stride
+        padding = (0,) + padding
+        # dilation = (1,) + dilation
+
+    layer = ctx.network.add_deconvolution_nd(
+        input=input_trt,
+        num_output_maps=out_channels,
+        kernel_shape=kernel_size,
+        kernel=kernel,
+        bias=bias)
+    layer.stride_nd = stride
+    layer.padding_nd = padding
+    # layer.dilation_nd = dilation
+
+    import pdb
+    pdb.set_trace()
+    if groups is not None:
+        layer.num_groups = groups
+
+    # reshape 1D from 2D back to 1D
+    if input_dim == 1:
+        layer = ctx.network.add_shuffle(layer.get_output(0))
+        layer.reshape_dims = (-1, output.shape[-1])
+        
+    output._trt = layer.get_output(0)
+
+
+@tensorrt_converter('torch.nn.functional.conv1d', enabled=trt_version() >= '7.0')
+@tensorrt_converter('torch.nn.functional.conv2d', enabled=trt_version() >= '7.0')
+@tensorrt_converter('torch.nn.functional.conv3d', enabled=trt_version() >= '7.0')
+def convert_Conv_trt7_functional(ctx):
+
+    input = get_arg(ctx, 'input', pos=0, default=None)
+    weight = get_arg(ctx, 'weight', pos=1, default=None)
+    bias = get_arg(ctx, 'bias', pos=2, default=None)
+    stride = get_arg(ctx, 'stride', pos=3, default=1)
+    padding = get_arg(ctx, 'padding', pos=4, default=0)
+    dilation = get_arg(ctx, 'dilation', pos=5, default=1)
+    groups = get_arg(ctx, 'groups', pos=6, default=1)
+    
+    input_trt = add_missing_trt_tensors(ctx.network, [input])[0]
+    output = ctx.method_return
+
+    input_dim = input.dim() - 2
+    
+    ndim = len(output.shape)
+
+    out_channels = int(weight.shape[0])
+    kernel_size = tuple(weight.shape[2:])
+    if not isinstance(kernel_size, tuple):
+        kernel_size = (kernel_size, ) * input_dim
+
+    if not isinstance(stride, tuple):
+        stride = (stride, ) * input_dim
+
+    if not isinstance(padding, tuple):
+        padding = (padding, ) * input_dim
+
+    if not isinstance(dilation, tuple):
+        dilation = (dilation, ) * input_dim
+
+    kernel = weight.detach().cpu().numpy()
+    
+    if bias is not None:
+        bias = bias.detach().cpu().numpy()
+
+    # reshape 1D to 2D to use 2D convolutions to accomplish 1D conv
+    if input_dim == 1:
+        layer = ctx.network.add_shuffle(input_trt)
+        layer.reshape_dims = (-1, 1, input.shape[-1])
+        input_trt = layer.get_output(0)
+        kernel_size = (1,) + kernel_size
+        stride = (1,) + stride
+        padding = (0,) + padding
+        dilation = (1,) + dilation
+
+    layer = ctx.network.add_convolution_nd(
+        input=input_trt,
+        num_output_maps=out_channels,
+        kernel_shape=kernel_size,
+        kernel=kernel,
+        bias=bias)
+    layer.stride_nd = stride
+    layer.padding_nd = padding
+    layer.dilation_nd = dilation
+
+    if groups is not None:
+        layer.num_groups = groups
+
+    # reshape 1D from 2D back to 1D
+    if input_dim == 1:
+        layer = ctx.network.add_shuffle(layer.get_output(0))
+        layer.reshape_dims = (-1, output.shape[-1])
+        
+    output._trt = layer.get_output(0)
 
 
 @tensorrt_converter('torch.nn.functional.pad')
 def convert_pad(ctx):
-    import pdb
-    pdb.set_trace()
     input = ctx.method_args[0]
     input_trt = add_missing_trt_tensors(ctx.network, [input])[0]
     output = ctx.method_return
