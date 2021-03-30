@@ -51,7 +51,7 @@ class Resample1d(nn.Module):
             diff_steps = out.shape[2] - expected_steps
             if diff_steps > 0:
                 assert(diff_steps % 2 == 0)
-                out = out[:,:,diff_steps//2:-diff_steps//2]
+                out = out[:,:,diff_steps//2:out.shape[-1]-diff_steps//2]
         else:
             assert(input_size % self.stride == 1)
             out = F.conv1d(out, self.filter, stride=self.stride, padding=0, groups=self.channels)

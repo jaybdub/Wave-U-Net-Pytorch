@@ -5,10 +5,20 @@ import torch
 sys.path.append('Wave-U-Net-Pytorch')
 import data.utils
 import model.utils as model_utils
-
+import time
 from test import predict_song
 from model.waveunet import Waveunet
-from torch2trt import torch2trt, tensorrt_converter, add_missing_trt_tensors, trt, trt_version, get_arg
+from torch2trt import torch2trt, TRTModule, tensorrt_converter, add_missing_trt_tensors, trt, trt_version, get_arg
+
+
+def benchmark_fps(example_data, model):
+    torch.cuda.current_stream().synchronize()
+    t0 = time.time()
+    for i in range(50):
+        out = model(example_data)
+    torch.cuda.current_stream().synchronize()
+    t1 = time.time()
+    return 50 / (t1 - t0)
 
 
 @tensorrt_converter('torch.nn.functional.conv_transpose1d', enabled=trt_version() >= '7.0')
@@ -71,8 +81,6 @@ def convert_Conv_trt7_functional(ctx):
     layer.padding_nd = padding
     # layer.dilation_nd = dilation
 
-    import pdb
-    pdb.set_trace()
     if groups is not None:
         layer.num_groups = groups
 
@@ -203,17 +211,61 @@ def main(args):
 
     model = model.eval().cuda()
 
-    data = torch.randn(1, 2, 97961).cuda()
+    example_data = torch.randn(1, 2, 97961).cuda()
 
     # convert submodules
-    for key, module in model.waveunets_exec.items():
-        print('Optimizing {key} with TensorRT...'.format(key=key))
-        module_trt = torch2trt(module, [data], fp16_mode=True)
-        print('Saving {key}...'.format(key=key))
-        if not os.path.exists('trt_modules'):
-            os.makedirs(model_trt)
-        torch.save(module_trt.state_dict(), 'trt_modules/{key}_trt.pth'.format(key=key))
+    if args.trt:
+        trt_modules = {}
 
+        for key, module in model.waveunets_exec.items():
+
+            trt_dir = 'trt_modules'
+            trt_path = os.path.join(trt_dir, '{key}_trt.pth'.format(key=key))
+
+            if not os.path.exists(trt_path):
+                # build tensorrt engines
+                print('Optimizing {key} with TensorRT...'.format(key=key))
+                module_trt = torch2trt(module, [data], fp16_mode=True)
+
+                print('Saving {key}...'.format(key=key))
+                if not os.path.exists(trt_dir):
+                    os.makedirs(trt_dir)
+
+                torch.save(module_trt.state_dict(), trt_path)
+
+                example_data = torch.randn(1, 2, 97961).cuda()
+
+                print('TensorRT Max abs error: {error}'.format(error=
+                    torch.max(torch.abs(module_trt(example_data) - module(example_data)))
+                ))
+                trt_modules[key] = module_trt
+
+                fps_torch = benchmark_fps(example_data, module)
+                fps_tensorrt = benchmark_fps(daexample_datata, module_trt)
+
+                print('FPS torch: {fps}'.format(fps=fps_torch))
+                print('FPS tensorrt: {fps}'.format(fps=fps_tensorrt))
+            else:
+                # load tensorrt engines
+                print('Loading tensorrt engine from {path}'.format(path=trt_path))
+                module_trt = TRTModule()
+                module_trt.load_state_dict(torch.load(trt_path))
+                trt_modules[key] = module_trt
+
+            # overwrite internal modules used for execution
+            model.waveunets_exec.update(trt_modules)
+
+    torch.cuda.current_stream().synchronize()
+    t0 = time.time()
+    preds = predict_song(args, args.input, model)
+    torch.cuda.current_stream().synchronize()
+    t1 = time.time()
+    elapsed_time = t1 - t0
+    print('Took {seconds} seconds to process audio'.format(seconds=elapsed_time))
+
+    output_folder = os.path.dirname(args.input) if args.output is None else args.output
+    for inst in preds.keys():
+        data.utils.write_wav(os.path.join(output_folder, os.path.basename(args.input) + "_" + inst + ".wav"), preds[inst], args.sr)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -253,7 +305,7 @@ if __name__ == '__main__':
     parser.add_argument('--input', type=str, default=os.path.join("audio_examples", "Cristina Vane - So Easy", "mix.mp3"),
                         help="Path to input mixture to be separated")
     parser.add_argument('--output', type=str, default=None, help="Output path (same folder as input path if not set)")
-
+    parser.add_argument('--trt', action='store_true')
     args = parser.parse_args()
 
     main(args)

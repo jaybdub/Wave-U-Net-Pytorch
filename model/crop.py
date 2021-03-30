@@ -20,4 +20,4 @@ def centre_crop(x, target):
     if crop < 0:
         raise ArithmeticError
 
-    return x[:, :, crop:-crop].contiguous()
+    return x[:, :, crop:x.shape[-1]-crop].contiguous()

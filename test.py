@@ -35,7 +35,7 @@ def predict(audio, model):
     :return: Source predictions, dictionary with source names as keys
     '''
     if isinstance(audio, torch.Tensor):
-        is_cuda = audio.is_cuda()
+        is_cuda = audio.is_cuda
         audio = audio.detach().cpu().numpy()
         return_mode = "pytorch"
     else:
@@ -67,6 +67,9 @@ def predict(audio, model):
             # Convert to Pytorch tensor for model prediction
             curr_input = torch.from_numpy(curr_input).unsqueeze(0)
 
+            if is_cuda:
+                curr_input = curr_input.contiguous().cuda()
+
             # Predict
             for key, curr_targets in compute_model_output(model, curr_input).items():
                 outputs[key][:,target_start_pos:target_start_pos+model.shapes["output_frames"]] = curr_targets.squeeze(0).cpu().numpy()
@@ -74,10 +77,10 @@ def predict(audio, model):
     # Crop to expected length (since we padded to handle the frame shift)
     outputs = {key : outputs[key][:,:expected_outputs] for key in outputs.keys()}
 
-    if return_mode == "pytorch":
-        outputs = torch.from_numpy(outputs)
-        if is_cuda:
-            outputs = outputs.cuda()
+    # if return_mode == "pytorch":
+    #     outputs = torch.from_numpy(outputs)
+    #     if is_cuda:
+    #         outputs = outputs.cuda()
     return outputs
 
 def predict_song(args, audio_path, model):
@@ -108,7 +111,15 @@ def predict_song(args, audio_path, model):
     # resample to model sampling rate
     mix_audio = data.utils.resample(mix_audio, mix_sr, args.sr)
 
-    sources = predict(mix_audio, model)
+    if args.cuda:
+        if isinstance(mix_audio, np.ndarray):
+            mix_audio = torch.from_numpy(mix_audio)
+        mix_audio = mix_audio.cuda()
+
+    sources = predict(mix_audio, model)  # will output numpy / cpu
+    
+    # if args.cuda:
+    #     sources = {key: sources[key].cpu().numpy() for key in sources.keys()}
 
     # Resample back to mixture sampling rate in case we had model on different sampling rate
     sources = {key : data.utils.resample(sources[key], args.sr, mix_sr) for key in sources.keys()}
