@@ -99,6 +99,37 @@ class DownsamplingBlock(nn.Module):
             curr_size = conv.get_input_size(curr_size)
         return curr_size
 
+
+
+class WaveunetModuleWrapper(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x):
+        shortcuts = []
+        out = x
+
+        # DOWNSAMPLING BLOCKS
+        for block in self.module.downsampling_blocks:
+            out, short = block(out)
+            shortcuts.append(short)
+
+        # BOTTLENECK CONVOLUTION
+        for conv in self.module.bottlenecks:
+            out = conv(out)
+
+        # UPSAMPLING BLOCKS
+        for idx, block in enumerate(self.module.upsampling_blocks):
+            out = block(out, shortcuts[-1 - idx])
+
+        # OUTPUT CONV
+        out = self.module.output_conv(out)
+        if not self.training:  # At test time clip predictions to valid amplitude range
+            out = out.clamp(min=-1.0, max=1.0)
+        return out
+
+
 class Waveunet(nn.Module):
     def __init__(self, num_inputs, num_channels, num_outputs, instruments, kernel_size, target_output_size, conv_type, res, separate=False, depth=1, strides=2):
         super(Waveunet, self).__init__()
@@ -116,6 +147,7 @@ class Waveunet(nn.Module):
         assert(kernel_size % 2 == 1)
 
         self.waveunets = nn.ModuleDict()
+        self.waveunets_exec = {}  # don't use module dict, to avoid saving state
 
         model_list = instruments if separate else ["ALL"]
         # Create a model for each source if we separate sources separately, otherwise only one (model_list=["ALL"])
@@ -143,6 +175,7 @@ class Waveunet(nn.Module):
             module.output_conv = nn.Conv1d(num_channels[0], outputs, 1)
 
             self.waveunets[instrument] = module
+            self.waveunets_exec[instrument] = WaveunetModuleWrapper(module)
 
         self.set_output_size(target_output_size)
 
@@ -188,44 +221,46 @@ class Waveunet(nn.Module):
         except AssertionError as e:
             return False
 
-    def forward_module(self, x, module):
-        '''
-        A forward pass through a single Wave-U-Net (multiple Wave-U-Nets might be used, one for each source)
-        :param x: Input mix
-        :param module: Network module to be used for prediction
-        :return: Source estimates
-        '''
-        shortcuts = []
-        out = x
+    # def forward_module(self, x, module):
+    #     '''
+    #     A forward pass through a single Wave-U-Net (multiple Wave-U-Nets might be used, one for each source)
+    #     :param x: Input mix
+    #     :param module: Network module to be used for prediction
+    #     :return: Source estimates
+    #     '''
+    #     shortcuts = []
+    #     out = x
 
-        # DOWNSAMPLING BLOCKS
-        for block in module.downsampling_blocks:
-            out, short = block(out)
-            shortcuts.append(short)
+    #     # DOWNSAMPLING BLOCKS
+    #     for block in module.downsampling_blocks:
+    #         out, short = block(out)
+    #         shortcuts.append(short)
 
-        # BOTTLENECK CONVOLUTION
-        for conv in module.bottlenecks:
-            out = conv(out)
+    #     # BOTTLENECK CONVOLUTION
+    #     for conv in module.bottlenecks:
+    #         out = conv(out)
 
-        # UPSAMPLING BLOCKS
-        for idx, block in enumerate(module.upsampling_blocks):
-            out = block(out, shortcuts[-1 - idx])
+    #     # UPSAMPLING BLOCKS
+    #     for idx, block in enumerate(module.upsampling_blocks):
+    #         out = block(out, shortcuts[-1 - idx])
 
-        # OUTPUT CONV
-        out = module.output_conv(out)
-        if not self.training:  # At test time clip predictions to valid amplitude range
-            out = out.clamp(min=-1.0, max=1.0)
-        return out
+    #     # OUTPUT CONV
+    #     out = module.output_conv(out)
+    #     if not self.training:  # At test time clip predictions to valid amplitude range
+    #         out = out.clamp(min=-1.0, max=1.0)
+    #     return out
 
     def forward(self, x, inst=None):
         curr_input_size = x.shape[-1]
         assert(curr_input_size == self.input_size) # User promises to feed the proper input himself, to get the pre-calculated (NOT the originally desired) output size
 
         if self.separate:
-            return {inst : self.forward_module(x, self.waveunets[inst])}
+            # return {inst : self.forward_module(x, self.waveunets[inst])}
+            return {inst: self.waveunets_exec[inst](x)}
         else:
             assert(len(self.waveunets) == 1)
-            out = self.forward_module(x, self.waveunets["ALL"])
+            # out = self.forward_module(x, self.waveunets["ALL"])
+            out = self.waveunets_exec["ALL"](x)
 
             out_dict = {}
             for idx, inst in enumerate(self.instruments):
